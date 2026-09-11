@@ -1,0 +1,94 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/5/CPU.hdl
+/**
+ * The Hack Central Processing unit (CPU).
+Parses the binary code in the instruction input
+and executes it according to the Hack machine
+language specification. 
+
+In the case of a
+C-instruction, computes the function specified by
+the instruction. If the instruction specifies to
+read a memory value, the inM input is expected to
+contain this value. If the instruction specifies
+to write a value to the memory, sets the outM
+output to this value, sets the addressM output to
+the target address, and asserts the writeM output
+(when writeM = 0, any value may appear in outM).
+
+If the reset input is 0, computes the address of
+the next instruction and sets the pc output to
+that value. If the reset input is 1, sets pc to 0.
+
+Note: The outM and writeM outputs are
+combinational: they are affected by the
+instruction's execution during the current cycle.
+The addressM and pc outputs are clocked: although
+they are affected by the instruction's execution,
+they commit to their new values only in the next
+cycle.
+ */
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+// “ixxaccccccdddjjj”.
+//            ADM
+// In case of a C-instruction, the a- and
+// c-bits code the comp part of the instruction,
+// while the d- and j-bits code the dest and jump
+// parts of the instruction, respectively (the x-bits
+// are not used, and can be ignored).
+
+//the single a-bit determines
+//whether the ALU will operate on the A register input or on the M input,
+
+    Not(in=instruction[15] , out=ainstr );
+
+    Mux16(a=aReg , b=inM , sel=instruction[12] , out=y );
+
+    ALU(x=dReg , y=y , zx=instruction[11] , nx=instruction[10] ,
+     zy=instruction[9] , ny=instruction[8] , f=instruction[7] ,
+      no=instruction[6] , out=alu , zr=zr , ng=ng );
+
+    And(a=instruction[5] , b=instruction[15] , out=writeA );
+    Or(a=writeA , b=ainstr , out=aLoad );
+    Mux16(a=instruction , b=alu , sel=writeA , out=aIn );
+    ARegister(in=aIn , load=aLoad , out=aReg, out[0..14]=addressM );
+    And(a=instruction[3] , b=instruction[15] , out=writeMM, out=writeM);
+    Mux16(a=false , b=alu , sel=writeMM , out=outM );
+
+
+    And(a=instruction[4] , b=instruction[15] , out=writeD );
+
+    DRegister(in=alu , load=writeD , out=dReg );
+
+    Or(a=ng , b=zr , out=npos );
+    Not(in=npos , out=pos );
+
+    And(a=ng , b=instruction[2] , out=j1 );
+    And(a=zr , b=instruction[1] , out=j2 );
+    And(a=pos , b=instruction[0] , out=j3 );
+
+    Or(a=j1 , b=j2 , out=jj );
+    Or(a=jj , b=j3 , out=jjj );
+    And(a=instruction[15] , b=jjj , out=jump );
+    Not(in=jump , out=njmp);
+
+    PC(in=aReg , load=jump , inc=njmp , reset=reset , out[0..14]=pc );
+
+    //DRegister(in= , load= , out= );
+	//// Replace this comment with your code.
+}

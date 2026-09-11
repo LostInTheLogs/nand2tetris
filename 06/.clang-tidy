@@ -1,0 +1,43 @@
+Checks: >
+    *,
+    google-*,
+    -google-objc-*,
+    -abseil-*,
+    -altera-*,
+    -android-*,
+    -fuchsia-*,
+    -llvm*,
+    -zircon-*,
+    -misc-non-private-member-variables-in-classes,
+    -google-readability-todo,
+    -bugprone-easily-swappable-parameters,
+    -modernize-use-trailing-return-type,
+    -*-magic-numbers
+
+CheckOptions:
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.ClassAbstractCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: CamelCase
+  - key: readability-identifier-naming.MethodCase
+    value: CamelCase
+  - key: readability-identifier-naming.PrivateMethodCase
+    value: CamelCase
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-identifier-naming.LocalVariableCase
+    value: lower_case
+  - key: readability-identifier-naming.GlobalVariableCase
+    value: snake_case
+  - key: readability-identifier-naming.GlobalVariablePrefix
+    value: "g_"
+  - key: readability-identifier-naming.MemberCase
+    value: lower_case
+  - key: readability-identifier-naming.ClassMemberCase
+    value: lower_case
