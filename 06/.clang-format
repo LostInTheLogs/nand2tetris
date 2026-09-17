@@ -1,4 +1,0 @@
-BasedOnStyle: Google
-AllowShortFunctionsOnASingleLine: Empty
-IndentWidth: 4
-AccessModifierOffset: -2

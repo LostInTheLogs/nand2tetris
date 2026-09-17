@@ -1,3 +1,0 @@
-CompileFlags:
-  Compiler: "gcc"
-  Add: [ -std=c++20, -Wall, -Wextra, -pedantic, -Wshadow, -Wnon-virtual-dtor, -Wimplicit-fallthrough, -Wlifetime ]

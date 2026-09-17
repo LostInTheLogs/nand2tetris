@@ -1,0 +1,4 @@
+(executable
+ (public_name hackasm)
+ (name main)
+ (libraries hackasm))
