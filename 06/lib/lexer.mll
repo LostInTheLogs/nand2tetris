@@ -1,24 +1,4 @@
-{
-  include Lexer_utils
-
-  type token =
-    | At
-    | Eol
-    | Number of int
-    | Symbol of string
-    | Label of string
-    | LParen
-    | RParen
-    | Equals
-    | Semicolon
-    | Plus
-    | Minus
-    | Ampersand
-    | Exclamation
-    | Pipe
-    | Eof
-    | UnexpectedCharacter of char
-}
+{ include Lexer_utils }
 
 let char = ['a'-'z' 'A'-'Z']
 
@@ -26,7 +6,8 @@ let digit = ['0'-'9']
 
 let symbol_beg = (char | ['_' '.' '$' ':'])
 
-let symbol_part = (char | digit | ['_' '.' '$' ':'])
+let symbol_part =
+  (char | digit | ['_' '.' '$' ':' '+' '-' '&' '!' '|'])
 
 rule token = parse
 | [' ' '\t'] { token lexbuf }
@@ -36,10 +17,6 @@ rule token = parse
 | ')' { RParen }
 | '=' { Equals }
 | ';' { Semicolon }
-| '+' { Plus }
-| '-' { Minus }
-| '&' { Ampersand }
-| '!' { Exclamation }
 | digit+ as digits { Number (int_of_string digits) }
 | symbol_beg symbol_part* as name { Symbol name }
 | eof { Eof }

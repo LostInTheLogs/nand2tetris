@@ -1,6 +1,6 @@
 (executable
  (public_name hackasm)
  (name main)
- (libraries hackasm base stdio)
+ (libraries hackasm)
  (preprocess
-  (pps ppx_jane)))
+  (pps ppx_deriving.show)))

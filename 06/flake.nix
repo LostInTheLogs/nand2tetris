@@ -4,7 +4,9 @@
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
     opam-nix.url = "github:tweag/opam-nix";
-    nixpkgs.follows = "opam-nix/nixpkgs";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    opam-nix.inputs.nixpkgs.follows = "nixpkgs";
+    opam-nix.inputs.opam2json.inputs.nixpkgs.follows = "nixpkgs";
     opam-repository = {
       url = "github:ocaml/opam-repository";
       flake = false;
@@ -30,6 +32,7 @@
         repos = [opam-repository];
         devPackagesQuery = {
           # You can add "development" packages here. They will get added to the devShell automatically.
+          ocaml-config = "*";
           ocaml-lsp-server = "*";
           ocamlformat = "*";
           menhir-lsp = "*";
@@ -46,7 +49,13 @@
             ## - or force ocamlfind to be a certain version:
             # ocamlfind = "1.9.2";
           };
-        scope = on.buildOpamProject' {inherit repos;} ./. query;
+        scope =
+          on.buildOpamProject' {
+            inherit repos;
+            inherit pkgs;
+          }
+          ./.
+          query;
         overlay = final: prev: {
           # You can add overrides here
           ${package} = prev.${package}.overrideAttrs (_: {
