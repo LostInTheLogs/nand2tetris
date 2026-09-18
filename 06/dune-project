@@ -13,7 +13,7 @@
 
 (license LICENSE)
 
-(documentation https://url/to/documentation)
+(documentation  https://url/to/documentation)
 
 
 (package
@@ -23,7 +23,10 @@
  (depends
   (ocaml (>= 4.14.0))
   (dune (>= 3.0))
-  (ppx_deriving (>= 5.2.1)))
+  (base (>= 0.17))
+  (stdio (>= 0.17))
+  (ppx_jane (>= 0.17)))
+  
  (tags
   ("add topics" "to describe" your project)))
 

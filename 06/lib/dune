@@ -1,5 +1,6 @@
 (library
  (name hackasm)
- (preprocess (pps ppx_deriving.show)))
+ (preprocess
+  (pps ppx_jane)))
 
 (ocamllex lexer)
