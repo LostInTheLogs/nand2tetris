@@ -5,7 +5,6 @@ type symbol_or_value = Literal of int | Symbol of string [@@deriving show]
 type instruction =
   | A_instr of symbol_or_value
   | C_instr of { dest : string; comp : string; jump : string }
-  | Label of string
 [@@deriving show]
 
 type program = instruction list [@@deriving show]
@@ -35,8 +34,8 @@ let parse_jump str =
   | "JEQ" -> Ok "010"
   | "JGE" -> Ok "011"
   | "JLT" -> Ok "100"
-  | "JNE" -> Ok "110"
-  | "JLE" -> Ok "101"
+  | "JNE" -> Ok "101"
+  | "JLE" -> Ok "110"
   | "JMP" -> Ok "111"
   | _ ->
       Error "Invalid jump, expected one of: JGT, JEQ, JGE, JLT, JNE, JLE, JMP"
@@ -109,7 +108,7 @@ let parse_a_instr line =
     | None -> Ok (A_instr (Symbol value))
     | Some i -> Error ("Unexpected character in symbol name", (line, i, i))
 
-let parse_label line =
+let parse_label line pc symbol_tbl =
   let len = String.length line in
   match String.find_first_index invalid_char ~start:1 line with
   | None -> Error ("Expected ')'", (line, len, len))
@@ -117,7 +116,11 @@ let parse_label line =
       if i = 1 then Error ("Expected label", (line, 1, 1))
       else if Char.Ascii.is_digit line.[1] then
         Error ("Labels can't start with a digit", (line, 1, 1))
-      else if i = len - 1 then Ok (Label (String.sub line 1 (len - 2)))
+      else if i = len - 1 then
+        let str = String.sub line 1 (len - 2) in
+        if Hashtbl.mem symbol_tbl str then
+          Error ("Expected EOL", (line, len - 1, len - 1))
+        else Ok (Hashtbl.add symbol_tbl str pc)
       else Error ("Expected EOL", (line, len - 1, len - 1))
   | Some i -> Error ("Unexpected character in label", (line, i, i))
 
@@ -158,29 +161,30 @@ let parse_c_instr line =
   let* comp = comp_res in
   Ok (C_instr { dest; comp; jump })
 
-let parse_line line =
-  match line.[0] with
-  | '@' -> parse_a_instr line
-  | '(' -> parse_label line
-  | _ -> parse_c_instr line
-
 let prepare_line line =
   let stripped = String.trim line in
   match String.index_opt stripped '/' with
   | Some i -> String.sub stripped 0 i
   | None -> stripped
 
-let parse channel =
+let parse channel symbol_tbl =
   let open ResultLet in
-  let rec loop ln acc =
+  let rec loop ln pc acc =
     match Option.map prepare_line (In_channel.input_line channel) with
-    | Some "" -> loop (ln + 1) acc
+    | Some "" -> loop (ln + 1) pc acc
+    | Some line when line.[0] = '(' ->
+        let unit_opt = parse_label line pc symbol_tbl in
+        let* () = map_err_add_ln ln unit_opt in
+        loop (ln + 1) pc acc
     | Some line ->
-        let* cmd = map_err_add_ln ln (parse_line line) in
-        loop (ln + 1) (cmd :: acc)
+        let cmd_opt =
+          if line.[0] = '@' then parse_a_instr line else parse_c_instr line
+        in
+        let* cmd = map_err_add_ln ln cmd_opt in
+        loop (ln + 1) (pc + 1) (cmd :: acc)
     | None -> Ok (List.rev acc)
   in
-  loop 0 []
+  loop 0 0 []
 
 let format_err file (msg, nr, (line, a, b)) =
   let carets =
@@ -191,8 +195,70 @@ let format_err file (msg, nr, (line, a, b)) =
   Printf.sprintf "%s:%d:%d\n" file (nr + 1) (a + 1)
   ^ line ^ "\n" ^ carets ^ "\nError: " ^ msg
 
-let () =
-  let res = parse stdin in
+let builtin_symbols =
+  [
+    ("SP", 0);
+    ("LCL", 1);
+    ("ARG", 2);
+    ("THIS", 3);
+    ("THAT", 4);
+    ("R0", 0);
+    ("R1", 1);
+    ("R2", 2);
+    ("R3", 3);
+    ("R4", 4);
+    ("R5", 5);
+    ("R6", 6);
+    ("R7", 7);
+    ("R8", 8);
+    ("R9", 9);
+    ("R10", 10);
+    ("R11", 11);
+    ("R12", 12);
+    ("R13", 13);
+    ("R14", 14);
+    ("R15", 15);
+    ("SCREEN", 16384);
+    ("KBD", 24576);
+  ]
+
+let int_to_binary16 n =
+  String.init 16 (fun i -> if (n lsr (15 - i)) land 1 = 1 then '1' else '0')
+
+let assemble_instr instr =
+  match instr with
+  | A_instr (Literal addr) -> int_to_binary16 addr
+  | C_instr { dest; comp; jump } -> "111" ^ comp ^ dest ^ jump
+  | _ -> assert false
+
+let second_pass program symbol_tbl =
+  let rec loop prg var_i acc =
+    match prg with
+    | A_instr (Symbol smb) :: rest -> (
+        match Hashtbl.find_opt symbol_tbl smb with
+        | Some v -> loop rest var_i (A_instr (Literal v) :: acc)
+        | None ->
+            let v = 16 + var_i in
+            Hashtbl.add symbol_tbl smb v;
+            loop rest (var_i + 1) (A_instr (Literal v) :: acc))
+    | a :: rest -> loop rest var_i (a :: acc)
+    | [] -> List.rev acc
+  in
+  loop program 0 []
+
+let assemble_file name =
+  let symbol_tbl = Hashtbl.of_seq (List.to_seq builtin_symbols) in
+  let res =
+    In_channel.with_open_text name @@ fun input -> parse input symbol_tbl
+  in
   match res with
-  | Ok ast -> print_string (show_program ast)
-  | Error err -> print_endline (format_err "stdin" err)
+  | Ok ast ->
+      let assembled = second_pass ast symbol_tbl |> List.map assemble_instr in
+      let out_name = Filename.remove_extension name |> fun n -> n ^ ".hack" in
+      Out_channel.with_open_text out_name @@ fun output ->
+      Out_channel.output_string output (String.concat "\n" assembled)
+  | Error err -> print_endline (format_err name err)
+
+let () =
+  if Array.length Sys.argv < 2 then print_endline "Specify input file(s)!"
+  else Array.to_seq Sys.argv |> Seq.drop 1 |> Seq.iter assemble_file
