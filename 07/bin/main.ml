@@ -13,6 +13,8 @@ type error = GErr of string * span
 (* let err_add_ln ln (msg, span) = (msg, ln, span) *)
 (* let map_err_add_ln ln err = Result.map_error (err_add_ln ln) err *)
 
+type state = { file : string; label_count : int ref }
+
 let tokenize_line line =
   let stripped =
     String.strip
@@ -53,24 +55,47 @@ let translate_push tokens =
 let translate_add =
   Ok [ "@SP"; "A=M-1"; "D=M"; "@SP"; "M=M-1"; "A=M-1"; "M=D+M" ]
 
-let translate_line line =
-  Result.map ~f:(fun a -> ("// " ^ line) :: a)
-  @@
+let mk_label { file; label_count } name =
+  let count = !label_count in
+  label_count := count + 1;
+  file ^ "." ^ name ^ "." ^ Int.to_string count
+
+(* comp can't contain M or A*)
+let mk_if state ~comp ~jump ~t ~f =
+  let label = mk_label state "if" in
+  let t_label = label ^ ".true" in
+  let e_label = label ^ ".endif" in
+  [ "// if"; "@" ^ t_label; comp ^ ";" ^ jump; "// (PROG.if.0.false)" ]
+  @ f
+  @ [ "@" ^ e_label; "0;JMP"; "(" ^ t_label ^ ")" ]
+  @ t
+  @ [ "(" ^ e_label ^ ")" ]
+
+let translate_eq state =
+  Ok
+    ([ "@SP"; "A=M-1"; "D=M"; "@SP"; "M=M-1"; "A=M-1"; "D=D-M" ]
+    @ mk_if state ~comp:"D" ~jump:"JEQ" ~t:[ "D=-1" ] ~f:[ "D=0" ]
+    @ [ "@SP"; "A=M-1"; "M=D" ])
+
+let translate_line line state =
   match tokenize_line line with
   | { t = "push" } :: rest as tokens -> translate_push tokens
   | { t = "add" } :: [] -> translate_add
-  | _ -> lerr "Unknown symbol" (0, 0)
+  | { t = "eq" } :: [] -> translate_eq state
+  | _ -> lerr "Unknown symbol, or TODO: extra args" (0, 0)
 
-let translate input =
+let translate input state =
   let rec loop ln acc =
     let line_opt = In_channel.input_line input in
     match line_opt with
+    | Some "" -> loop (ln + 1) acc
     | Some line ->
         let open Result.Let_syntax in
         let mk_global (LErr (msg, span)) = GErr (msg, (span, ln, { line })) in
         let map_global a = Result.map_error ~f:mk_global a in
-        let%bind res = map_global (translate_line line) in
-        loop (ln + 1) (acc @ res)
+        let%bind res = map_global (translate_line line state) in
+        loop (ln + 1)
+          (acc @ (("/// " ^ Int.to_string (ln + 1) ^ " " ^ line) :: res))
     | None -> Ok acc
   in
   loop 0 []
@@ -88,7 +113,8 @@ let format_err file (GErr (msg, span)) =
 
 let translate_file name =
   (* let res = In_channel.with_open_text name @@ fun input -> tokenize input in *)
-  let res = translate stdin in
+  let state = { file = name; label_count = ref 0 } in
+  let res = translate stdin state in
   match res with
   | Ok ast ->
       (* let assembled = second_pass ast symbol_tbl |> List.map assemble_instr in
