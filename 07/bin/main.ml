@@ -54,6 +54,8 @@ let translate_add =
   Ok [ "@SP"; "A=M-1"; "D=M"; "@SP"; "M=M-1"; "A=M-1"; "M=D+M" ]
 
 let translate_line line =
+  Result.map ~f:(fun a -> ("// " ^ line) :: a)
+  @@
   match tokenize_line line with
   | { t = "push" } :: rest as tokens -> translate_push tokens
   | { t = "add" } :: [] -> translate_add
