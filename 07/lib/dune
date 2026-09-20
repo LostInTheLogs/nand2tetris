@@ -1,0 +1,4 @@
+(library
+ (name hackvmt)
+ (preprocess
+  (pps ppx_deriving.show)))

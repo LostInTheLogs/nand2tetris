@@ -1,0 +1,6 @@
+(executable
+ (public_name hackvmt)
+ (name main)
+ (libraries base stdio hackvmt)
+ (preprocess
+  (pps ppx_jane)))

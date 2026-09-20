@@ -162,10 +162,9 @@ let parse_c_instr line =
   Ok (C_instr { dest; comp; jump })
 
 let prepare_line line =
-  let stripped = String.trim line in
-  match String.index_opt stripped '/' with
-  | Some i -> String.sub stripped 0 i
-  | None -> stripped
+  match String.index_opt line '/' with
+  | Some i -> String.trim @@ String.sub line 0 i
+  | None -> String.trim line
 
 let parse channel symbol_tbl =
   let open ResultLet in
