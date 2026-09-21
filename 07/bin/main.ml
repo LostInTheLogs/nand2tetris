@@ -40,6 +40,11 @@ let lerr a b = Error (LErr (a, b))
 let fin arr res =
   match arr with [] -> res | { s } :: _ -> lerr "Expected EOL" s
 
+(* MEM LAYOUT 
+0 SP, 1 LCL, 2 ARG, 3 THIS, 4 THAT,
+5-12 temp segment
+13-15 unused by programs *)
+
 let mk_label { file; label_count } name =
   let count = !label_count in
   label_count := count + 1;
@@ -56,7 +61,13 @@ let mk_if state ~comp ~jump ~t ~f =
   @ t
   @ [ "(" ^ e_label ^ ")" ]
 
-let mk_push { t = index; s } nil upper getter =
+(** Creates a stack operation with the offset from [token].
+
+    @param token The offset token.
+    @param nil The next token.
+    @param upper Upper bound of the offset.
+    @param pose Asm after setting D to the offset. *)
+let mk_stack_op { t = index; s } nil upper post =
   fin nil
   @@
   let open Result.Let_syntax in
@@ -65,35 +76,18 @@ let mk_push { t = index; s } nil upper getter =
     Result.of_option ~error:(LErr ("Expected a number", s)) offset_opt
   in
   if String.for_all index ~f:Char.is_digit && 0 <= offset && offset <= upper
-  then
-    Ok
-      ([ "@" ^ index; "D=A" ] @ getter @ [ "@SP"; "A=M"; "M=D"; "@SP"; "M=M+1" ])
+  then Ok ([ "@" ^ index; "D=A" ] @ post)
   else lerr ("invalid offset, must be between 0 and " ^ Int.to_string upper) s
 
-(* 
-  
+(** Creates a push operation with the offset from [token].
 
-pop this 5 
-
-stack -> MEM[ MEM[THIS] + 5]
-
-@SP M=M-1
-
- *)
-
-let mk_pop { t = index; s } nil upper getter =
-  fin nil
-  @@
-  let open Result.Let_syntax in
-  let offset_opt = Int.of_string_opt index in
-  let%bind offset =
-    Result.of_option ~error:(LErr ("Expected a number", s)) offset_opt
-  in
-  if String.for_all index ~f:Char.is_digit && 0 <= offset && offset <= upper
-  then
-    Ok
-      ([ "@" ^ index; "D=A" ] @ getter @ [ "@SP"; "A=M"; "M=D"; "@SP"; "M=M+1" ])
-  else lerr ("invalid offset, must be between 0 and " ^ Int.to_string upper) s
+    @param token The offset token.
+    @param nil The next token.
+    @param upper Upper bound of the offset.
+    @param getter Asm getter of the value: [D:offset -> D:value] *)
+let mk_push token nil upper getter =
+  let post = getter @ [ "@SP"; "A=M"; "M=D"; "@SP"; "M=M+1" ] in
+  mk_stack_op token nil upper post
 
 let translate_push tokens =
   match tokens with
@@ -102,13 +96,46 @@ let translate_push tokens =
   | _ :: { t = "pointer" } :: tok :: nil ->
       mk_push tok nil 1 [ "@THIS"; "A=D+A"; "D=M" ]
   | _ :: { t = "this" } :: tok :: nil ->
-      mk_push tok nil 1 [ "@THIS"; "A=M"; "A=D+A"; "D=M" ]
+      mk_push tok nil 32767 [ "@THIS"; "A=M"; "A=D+A"; "D=M" ]
   | _ :: { t = "that" } :: tok :: nil ->
-      mk_push tok nil 1 [ "@THIS"; "A=M"; "A=D+A"; "D=M" ]
+      mk_push tok nil 32767 [ "@THAT"; "A=M"; "A=D+A"; "D=M" ]
   | _ :: { t = "local" } :: tok :: nil ->
-      mk_push tok nil 32767 [ "@LCL"; "A=D+A"; "D=M" ]
+      mk_push tok nil 32767 [ "@LCL"; "A=D+M"; "D=M" ]
+  | _ :: { t = "argument" } :: tok :: nil ->
+      mk_push tok nil 32767 [ "@ARG"; "A=D+M"; "D=M" ]
   | _ :: { t = "temp" } :: tok :: nil ->
       mk_push tok nil 7 [ "@R5"; "A=D+A"; "D=M" ]
+  | _ :: { s } :: _ -> lerr "Unknown segment" s
+  | { s = _, b } :: _ -> lerr "Unexpected EOL" (b, b)
+  | _ -> assert false
+
+(** Creates a pop operation with the offset from [token].
+
+    @param token The offset token.
+    @param nil The next token.
+    @param upper Upper bound of the offset.
+    @param getter Asm getter of the dst addr [D:offset -> D:dst_addr] *)
+let mk_pop token nil upper getter =
+  (* R13 stores the dst addr *)
+  let post =
+    getter @ [ "@R13"; "M=D"; "@SP"; "AM=M-1"; "D=M"; "@R13"; "A=M"; "M=D" ]
+  in
+  mk_stack_op token nil upper post
+
+let translate_pop tokens =
+  match tokens with
+  (* TODO: can do the 0/1 options manually for less asm*)
+  | _ :: { t = "pointer" } :: tok :: nil ->
+      mk_pop tok nil 1 [ "@THIS"; "D=D+A" ]
+  | _ :: { t = "this" } :: tok :: nil ->
+      mk_pop tok nil 32767 [ "@THIS"; "A=M"; "D=D+A" ]
+  | _ :: { t = "that" } :: tok :: nil ->
+      mk_pop tok nil 32767 [ "@THAT"; "A=M"; "D=D+A" ]
+  | _ :: { t = "local" } :: tok :: nil ->
+      mk_pop tok nil 32767 [ "@LCL"; "D=D+M" ]
+  | _ :: { t = "argument" } :: tok :: nil ->
+      mk_pop tok nil 32767 [ "@ARG"; "D=D+M" ]
+  | _ :: { t = "temp" } :: tok :: nil -> mk_pop tok nil 7 [ "@R5"; "D=D+A" ]
   | _ :: { s } :: _ -> lerr "Unknown segment" s
   | { s = _, b } :: _ -> lerr "Unexpected EOL" (b, b)
   | _ -> assert false
@@ -146,6 +173,7 @@ let translate_gt state =
 let translate_line line state =
   match tokenize_line line with
   | { t = "push" } :: rest as tokens -> translate_push tokens
+  | { t = "pop" } :: rest as tokens -> translate_pop tokens
   | { t = "neg" } :: nil -> fin nil @@ translate_neg
   | { t = "not" } :: nil -> fin nil @@ translate_not
   | { t = "add" } :: nil -> fin nil @@ translate_add
@@ -196,11 +224,11 @@ let translate_file name =
       (* Out_channel.with_open_text out_name @@ fun output -> *)
       (* Out_channel.output_string output (String.concat "\n" assembled) *)
       print_endline @@ String.concat_lines ast
-  | Error err -> print_endline (format_err name err)
+  | Error err -> prerr_endline (format_err name err)
 
 let () =
   let argv = Sys.get_argv () in
-  if Array.length argv < 2 then print_endline "Specify input file(s)!"
+  if Array.length argv < 2 then prerr_endline "Specify input file(s)!"
   else
     argv |> Array.to_sequence_mutable
     |> Fn.flip Sequence.drop_eagerly 1
