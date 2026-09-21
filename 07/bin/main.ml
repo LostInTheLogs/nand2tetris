@@ -37,30 +37,15 @@ let tokenize_line line =
 
 let lerr a b = Error (LErr (a, b))
 
-let translate_push tokens =
-  match tokens with
-  | [ _; { t = "constant" }; { t = const; s } ] ->
-      let open Result.Let_syntax in
-      let wrr = Int.of_string_opt const in
-      let%bind v =
-        Result.of_option ~error:(LErr ("Expected a number", s)) wrr
-      in
-      if String.for_all const ~f:Char.is_digit && 0 <= v && v <= 32767 then
-        Ok [ "@" ^ const; "D=A"; "@SP"; "A=M"; "M=D"; "@SP"; "M=M+1" ]
-      else lerr "invalid offset, must be [0; 32767]" s
-  | _ :: { s } :: _ -> lerr "Unknown symbol" s
-  | { s = _, b } :: _ -> lerr "Unexpected EOL" (b, b)
-  | _ -> assert false
-
-let translate_add =
-  Ok [ "@SP"; "A=M-1"; "D=M"; "@SP"; "M=M-1"; "A=M-1"; "M=D+M" ]
+let fin arr res =
+  match arr with [] -> res | { s } :: _ -> lerr "Expected EOL" s
 
 let mk_label { file; label_count } name =
   let count = !label_count in
   label_count := count + 1;
   file ^ "." ^ name ^ "." ^ Int.to_string count
 
-(* comp can't contain M or A*)
+(** comp can't contain M or A*)
 let mk_if state ~comp ~jump ~t ~f =
   let label = mk_label state "if" in
   let t_label = label ^ ".true" in
@@ -71,18 +56,107 @@ let mk_if state ~comp ~jump ~t ~f =
   @ t
   @ [ "(" ^ e_label ^ ")" ]
 
+let mk_push { t = index; s } nil upper getter =
+  fin nil
+  @@
+  let open Result.Let_syntax in
+  let offset_opt = Int.of_string_opt index in
+  let%bind offset =
+    Result.of_option ~error:(LErr ("Expected a number", s)) offset_opt
+  in
+  if String.for_all index ~f:Char.is_digit && 0 <= offset && offset <= upper
+  then
+    Ok
+      ([ "@" ^ index; "D=A" ] @ getter @ [ "@SP"; "A=M"; "M=D"; "@SP"; "M=M+1" ])
+  else lerr ("invalid offset, must be between 0 and " ^ Int.to_string upper) s
+
+(* 
+  
+
+pop this 5 
+
+stack -> MEM[ MEM[THIS] + 5]
+
+@SP M=M-1
+
+ *)
+
+let mk_pop { t = index; s } nil upper getter =
+  fin nil
+  @@
+  let open Result.Let_syntax in
+  let offset_opt = Int.of_string_opt index in
+  let%bind offset =
+    Result.of_option ~error:(LErr ("Expected a number", s)) offset_opt
+  in
+  if String.for_all index ~f:Char.is_digit && 0 <= offset && offset <= upper
+  then
+    Ok
+      ([ "@" ^ index; "D=A" ] @ getter @ [ "@SP"; "A=M"; "M=D"; "@SP"; "M=M+1" ])
+  else lerr ("invalid offset, must be between 0 and " ^ Int.to_string upper) s
+
+let translate_push tokens =
+  match tokens with
+  | _ :: { t = "constant" } :: tok :: nil -> mk_push tok nil 32767 []
+  (* TODO: can do the 0/1 options manually for less asm*)
+  | _ :: { t = "pointer" } :: tok :: nil ->
+      mk_push tok nil 1 [ "@THIS"; "A=D+A"; "D=M" ]
+  | _ :: { t = "this" } :: tok :: nil ->
+      mk_push tok nil 1 [ "@THIS"; "A=M"; "A=D+A"; "D=M" ]
+  | _ :: { t = "that" } :: tok :: nil ->
+      mk_push tok nil 1 [ "@THIS"; "A=M"; "A=D+A"; "D=M" ]
+  | _ :: { t = "local" } :: tok :: nil ->
+      mk_push tok nil 32767 [ "@LCL"; "A=D+A"; "D=M" ]
+  | _ :: { t = "temp" } :: tok :: nil ->
+      mk_push tok nil 7 [ "@R5"; "A=D+A"; "D=M" ]
+  | _ :: { s } :: _ -> lerr "Unknown segment" s
+  | { s = _, b } :: _ -> lerr "Unexpected EOL" (b, b)
+  | _ -> assert false
+
+(* single arg *)
+
+let translate_neg = Ok [ "@SP"; "A=M-1"; "M=-M" ]
+let translate_not = Ok [ "@SP"; "A=M-1"; "M=!M" ]
+
+(* double arg *)
+
+let translate_add = Ok [ "@SP"; "AM=M-1"; "D=M"; "@SP"; "A=M-1"; "M=D+M" ]
+let translate_sub = Ok [ "@SP"; "AM=M-1"; "D=M"; "@SP"; "A=M-1"; "M=M-D" ]
+let translate_and = Ok [ "@SP"; "AM=M-1"; "D=M"; "@SP"; "A=M-1"; "M=D&M" ]
+let translate_or = Ok [ "@SP"; "AM=M-1"; "D=M"; "@SP"; "A=M-1"; "M=D|M" ]
+
 let translate_eq state =
   Ok
-    ([ "@SP"; "A=M-1"; "D=M"; "@SP"; "M=M-1"; "A=M-1"; "D=D-M" ]
+    ([ "@SP"; "AM=M-1"; "D=M"; "@SP"; "A=M-1"; "D=D-M" ]
     @ mk_if state ~comp:"D" ~jump:"JEQ" ~t:[ "D=-1" ] ~f:[ "D=0" ]
+    @ [ "@SP"; "A=M-1"; "M=D" ])
+
+let translate_lt state =
+  Ok
+    ([ "@SP"; "AM=M-1"; "D=M"; "@SP"; "A=M-1"; "D=D-M" ]
+    @ mk_if state ~comp:"D" ~jump:"JGT" ~t:[ "D=-1" ] ~f:[ "D=0" ]
+    @ [ "@SP"; "A=M-1"; "M=D" ])
+
+let translate_gt state =
+  Ok
+    ([ "@SP"; "AM=M-1"; "D=M"; "@SP"; "A=M-1"; "D=D-M" ]
+    @ mk_if state ~comp:"D" ~jump:"JLT" ~t:[ "D=-1" ] ~f:[ "D=0" ]
     @ [ "@SP"; "A=M-1"; "M=D" ])
 
 let translate_line line state =
   match tokenize_line line with
   | { t = "push" } :: rest as tokens -> translate_push tokens
-  | { t = "add" } :: [] -> translate_add
-  | { t = "eq" } :: [] -> translate_eq state
-  | _ -> lerr "Unknown symbol, or TODO: extra args" (0, 0)
+  | { t = "neg" } :: nil -> fin nil @@ translate_neg
+  | { t = "not" } :: nil -> fin nil @@ translate_not
+  | { t = "add" } :: nil -> fin nil @@ translate_add
+  | { t = "sub" } :: nil -> fin nil @@ translate_sub
+  | { t = "and" } :: nil -> fin nil @@ translate_and
+  | { t = "or" } :: nil -> fin nil @@ translate_or
+  | { t = "eq" } :: nil -> fin nil @@ translate_eq state
+  | { t = "lt" } :: nil -> fin nil @@ translate_lt state
+  | { t = "gt" } :: nil -> fin nil @@ translate_gt state
+  | [] -> Ok []
+  | _ -> lerr "Unknown symbol, or extra args" (0, 0)
 
 let translate input state =
   let rec loop ln acc =
