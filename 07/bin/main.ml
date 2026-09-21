@@ -61,13 +61,16 @@ let mk_if state ~comp ~jump ~t ~f =
   @ t
   @ [ "(" ^ e_label ^ ")" ]
 
+let mk_stack_lbl file idx = file ^ ".local." ^ idx
+
 (** Creates a stack operation with the offset from [token].
 
     @param token The offset token.
     @param nil The next token.
     @param upper Upper bound of the offset.
-    @param pose Asm after setting D to the offset. *)
-let mk_stack_op { t = index; s } nil upper post =
+    @param post Asm after setting D to the offset.
+    @param idx_f @offset transform. *)
+let mk_stack_op { t = index; s } nil upper post idx_f =
   fin nil
   @@
   let open Result.Let_syntax in
@@ -76,7 +79,7 @@ let mk_stack_op { t = index; s } nil upper post =
     Result.of_option ~error:(LErr ("Expected a number", s)) offset_opt
   in
   if String.for_all index ~f:Char.is_digit && 0 <= offset && offset <= upper
-  then Ok ([ "@" ^ index; "D=A" ] @ post)
+  then Ok ([ "@" ^ idx_f index; "D=A" ] @ post)
   else lerr ("invalid offset, must be between 0 and " ^ Int.to_string upper) s
 
 (** Creates a push operation with the offset from [token].
@@ -84,27 +87,30 @@ let mk_stack_op { t = index; s } nil upper post =
     @param token The offset token.
     @param nil The next token.
     @param upper Upper bound of the offset.
-    @param getter Asm getter of the value: [D:offset -> D:value] *)
-let mk_push token nil upper getter =
+    @param getter Asm getter of the value: [D:offset -> D:value] 
+    @param idx_f @offset transform. *)
+let mk_push token nil upper getter idx_f =
   let post = getter @ [ "@SP"; "A=M"; "M=D"; "@SP"; "M=M+1" ] in
-  mk_stack_op token nil upper post
+  mk_stack_op token nil upper post idx_f
 
-let translate_push tokens =
+let translate_push { file } tokens =
   match tokens with
-  | _ :: { t = "constant" } :: tok :: nil -> mk_push tok nil 32767 []
+  | _ :: { t = "constant" } :: tok :: nil -> mk_push tok nil 32767 [] Fn.id
   (* TODO: can do the 0/1 options manually for less asm*)
   | _ :: { t = "pointer" } :: tok :: nil ->
-      mk_push tok nil 1 [ "@THIS"; "A=D+A"; "D=M" ]
+      mk_push tok nil 1 [ "@THIS"; "A=D+A"; "D=M" ] Fn.id
   | _ :: { t = "this" } :: tok :: nil ->
-      mk_push tok nil 32767 [ "@THIS"; "A=M"; "A=D+A"; "D=M" ]
+      mk_push tok nil 32767 [ "@THIS"; "A=M"; "A=D+A"; "D=M" ] Fn.id
   | _ :: { t = "that" } :: tok :: nil ->
-      mk_push tok nil 32767 [ "@THAT"; "A=M"; "A=D+A"; "D=M" ]
+      mk_push tok nil 32767 [ "@THAT"; "A=M"; "A=D+A"; "D=M" ] Fn.id
   | _ :: { t = "local" } :: tok :: nil ->
-      mk_push tok nil 32767 [ "@LCL"; "A=D+M"; "D=M" ]
+      mk_push tok nil 32767 [ "@LCL"; "A=D+M"; "D=M" ] Fn.id
   | _ :: { t = "argument" } :: tok :: nil ->
-      mk_push tok nil 32767 [ "@ARG"; "A=D+M"; "D=M" ]
+      mk_push tok nil 32767 [ "@ARG"; "A=D+M"; "D=M" ] Fn.id
   | _ :: { t = "temp" } :: tok :: nil ->
-      mk_push tok nil 7 [ "@R5"; "A=D+A"; "D=M" ]
+      mk_push tok nil 7 [ "@R5"; "A=D+A"; "D=M" ] Fn.id
+  | _ :: { t = "static" } :: tok :: nil ->
+      mk_push tok nil 32767 [ "D=M" ] (mk_stack_lbl file)
   | _ :: { s } :: _ -> lerr "Unknown segment" s
   | { s = _, b } :: _ -> lerr "Unexpected EOL" (b, b)
   | _ -> assert false
@@ -114,28 +120,32 @@ let translate_push tokens =
     @param token The offset token.
     @param nil The next token.
     @param upper Upper bound of the offset.
-    @param getter Asm getter of the dst addr [D:offset -> D:dst_addr] *)
-let mk_pop token nil upper getter =
+    @param getter Asm getter of the dst addr [D:offset -> D:dst_addr]
+    @param idx_f @offset transform. *)
+let mk_pop token nil upper getter idx_f =
   (* R13 stores the dst addr *)
   let post =
     getter @ [ "@R13"; "M=D"; "@SP"; "AM=M-1"; "D=M"; "@R13"; "A=M"; "M=D" ]
   in
-  mk_stack_op token nil upper post
+  mk_stack_op token nil upper post idx_f
 
-let translate_pop tokens =
+let translate_pop { file } tokens =
   match tokens with
   (* TODO: can do the 0/1 options manually for less asm*)
   | _ :: { t = "pointer" } :: tok :: nil ->
-      mk_pop tok nil 1 [ "@THIS"; "D=D+A" ]
+      mk_pop tok nil 1 [ "@THIS"; "D=D+A" ] Fn.id
   | _ :: { t = "this" } :: tok :: nil ->
-      mk_pop tok nil 32767 [ "@THIS"; "A=M"; "D=D+A" ]
+      mk_pop tok nil 32767 [ "@THIS"; "A=M"; "D=D+A" ] Fn.id
   | _ :: { t = "that" } :: tok :: nil ->
-      mk_pop tok nil 32767 [ "@THAT"; "A=M"; "D=D+A" ]
+      mk_pop tok nil 32767 [ "@THAT"; "A=M"; "D=D+A" ] Fn.id
   | _ :: { t = "local" } :: tok :: nil ->
-      mk_pop tok nil 32767 [ "@LCL"; "D=D+M" ]
+      mk_pop tok nil 32767 [ "@LCL"; "D=D+M" ] Fn.id
   | _ :: { t = "argument" } :: tok :: nil ->
-      mk_pop tok nil 32767 [ "@ARG"; "D=D+M" ]
-  | _ :: { t = "temp" } :: tok :: nil -> mk_pop tok nil 7 [ "@R5"; "D=D+A" ]
+      mk_pop tok nil 32767 [ "@ARG"; "D=D+M" ] Fn.id
+  | _ :: { t = "temp" } :: tok :: nil ->
+      mk_pop tok nil 7 [ "@R5"; "D=D+A" ] Fn.id
+  | _ :: { t = "static" } :: tok :: nil ->
+      mk_pop tok nil 32767 [] (mk_stack_lbl file)
   | _ :: { s } :: _ -> lerr "Unknown segment" s
   | { s = _, b } :: _ -> lerr "Unexpected EOL" (b, b)
   | _ -> assert false
@@ -170,10 +180,10 @@ let translate_gt state =
     @ mk_if state ~comp:"D" ~jump:"JLT" ~t:[ "D=-1" ] ~f:[ "D=0" ]
     @ [ "@SP"; "A=M-1"; "M=D" ])
 
-let translate_line line state =
+let translate_line state line =
   match tokenize_line line with
-  | { t = "push" } :: rest as tokens -> translate_push tokens
-  | { t = "pop" } :: rest as tokens -> translate_pop tokens
+  | { t = "push" } :: rest as tokens -> translate_push state tokens
+  | { t = "pop" } :: rest as tokens -> translate_pop state tokens
   | { t = "neg" } :: nil -> fin nil @@ translate_neg
   | { t = "not" } :: nil -> fin nil @@ translate_not
   | { t = "add" } :: nil -> fin nil @@ translate_add
@@ -195,7 +205,7 @@ let translate input state =
         let open Result.Let_syntax in
         let mk_global (LErr (msg, span)) = GErr (msg, (span, ln, { line })) in
         let map_global a = Result.map_error ~f:mk_global a in
-        let%bind res = map_global (translate_line line state) in
+        let%bind res = map_global (translate_line state line) in
         loop (ln + 1)
           (acc @ (("/// " ^ Int.to_string (ln + 1) ^ " " ^ line) :: res))
     | None -> Ok acc
