@@ -1,0 +1,4 @@
+(library
+ (name jackc)
+ (preprocess
+  (pps ppx_jane)))

@@ -1,0 +1,6 @@
+(executable
+ (public_name jackc)
+ (name main)
+ (libraries jackc)
+ (preprocess
+  (pps ppx_jane)))
