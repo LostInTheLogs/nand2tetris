@@ -138,12 +138,26 @@ let tokenize str file =
   in
   List.rev @@ go (0, MNone, [])
 
-type j_expr = string [@@deriving sexp_of]
+type j_expr = string spanned [@@deriving sexp_of]
 
-type j_field = { name : string spanned; ftype : string spanned }
+type j_statement =
+  | Let of { dst : string spanned; src : j_expr }
+  | Return of j_expr
 [@@deriving sexp_of]
 
-type j_method = unit [@@deriving sexp_of]
+type j_field = { ftype : string spanned; name : string spanned }
+[@@deriving sexp_of]
+
+type metod_category = Method | Constructor [@@deriving sexp_of]
+
+type j_method = {
+  category : metod_category;
+  mtype : string spanned;
+  name : string spanned;
+  params : j_field list;
+  statements : j_statement list;
+}
+[@@deriving sexp_of]
 
 type j_class = {
   name : string spanned;
@@ -166,6 +180,11 @@ let expect_ident eof tokens expected_msg =
   | { v = TIdentifier name; s } :: rest -> ({ v = name; s }, eof_span s, rest)
   | _ -> err_expected eof tokens expected_msg
 
+let expect_x_ident eof tokens expected =
+  let msg = "'" ^ expected ^ "'" in
+  let sth, eof, rest = expect_ident eof tokens msg in
+  if sth.v = expected then (sth, eof, rest) else err ("Expected " ^ msg) sth.s
+
 let expect_lparen eof tokens paren =
   match tokens with
   | { v = TLParen p; s } :: rest when p = paren ->
@@ -174,9 +193,71 @@ let expect_lparen eof tokens paren =
 
 let todo_ : span = (1, 1, { source = ""; filename = "" })
 
+(*
+class cwrr { field int iaa; method int iwrr (string sbb, int icc) { return ret; return wr; }  }
+ *)
+
+let parse_expr eof tokens =
+  let what, eof, rest = expect_ident eof tokens "expression" in
+  (what, eof, rest)
+
+let parse_stmt eof tokens =
+  match tokens with
+  | { v = TKeyword "return"; s } :: rest ->
+      let eof = eof_span s in
+      let what, eof, rest = parse_expr eof rest in
+      let _, eof, rest = expect_x_ident eof rest ";" in
+      (Return what, eof, rest)
+  | _ -> failwith "todo"
+
+let parse_method eof tokens =
+  match tokens with
+  | { v = TKeyword (("constructor" | "method") as cat); s } :: rest ->
+      let eof = eof_span s in
+      let category =
+        match cat with
+        | "constructor" -> Constructor
+        | "method" -> Method
+        | _ -> failwith "unreachable"
+      in
+      let mtype, eof, rest = expect_ident eof rest "method type" in
+      let name, eof, rest = expect_ident eof rest "method name" in
+      (* params *)
+      let rec go_params eof tokens acc =
+        match tokens with
+        | { v = TRParen ')' } :: rest -> (acc, eof, rest)
+        | _ -> (
+            let atype, eof, rest = expect_ident eof tokens "argument type" in
+            let aname, eof, rest = expect_ident eof rest "argument name" in
+            let acc = { name = aname; ftype = atype } :: acc in
+
+            match rest with
+            | { v = TRParen ')' } :: rest -> (acc, eof, rest)
+            | { v = TIdentifier "," } :: rest -> go_params eof rest acc
+            | _ -> err_expected eof rest "')'")
+      in
+      let _, eof, rest = expect_lparen eof rest '(' in
+      let params, eof, rest = go_params eof rest [] in
+      let params = List.rev params in
+      (* body *)
+      let rec go_body eof tokens acc =
+        match tokens with
+        | { v = TRParen '}' } :: rest -> (acc, eof, rest)
+        | _ ->
+            let stmt, eof, rest = parse_stmt eof tokens in
+            go_body eof rest (stmt :: acc)
+      in
+      let _, eof, rest = expect_lparen eof rest '{' in
+      let stmts, eof, rest = go_body eof rest [] in
+      let stmts = List.rev stmts in
+
+      ({ category; mtype; name; params; statements = stmts }, eof, rest)
+  | _ -> failwith "unreachable"
+
 let parse_field eof tokens =
   match tokens with
-  | { v = TKeyword "field" } :: rest ->
+  | { v = TKeyword "field"; s } :: rest ->
+      let eof = eof_span s in
       let ftype, eof, rest = expect_ident eof rest "field type" in
       let rec go eof tokens acc =
         let name, eof, rest = expect_ident eof tokens "field name" in
@@ -196,8 +277,11 @@ let parse_class eof tokens =
   let rec go eof tokens cls =
     match tokens with
     | { v = TKeyword "field" } :: rest ->
-        let field, eof, rest = parse_field eof tokens in
-        go eof rest { cls with fields = field @ cls.fields }
+        let item, eof, rest = parse_field eof tokens in
+        go eof rest { cls with fields = item @ cls.fields }
+    | { v = TKeyword "method" } :: rest ->
+        let item, eof, rest = parse_method eof tokens in
+        go eof rest { cls with methods = item :: cls.methods }
     | { v = TRParen '}' } :: rest -> (cls, eof, rest)
     | _ -> err_expected eof tokens "'}'"
   in
@@ -222,8 +306,8 @@ let compile_file file =
   (* In_channel.with_open_text name @@ fun input -> parse input symbol_tbl *)
   let str = In_channel.input_all stdin in
   let tokens = tokenize str file in
-  let toks = List.map tokens ~f:(fun { v } -> v) in
-  Stdio.print_s (sexp_of_tokens toks);
+  (* let toks = List.map tokens ~f:(fun { v } -> v) in
+  Stdio.print_s (sexp_of_tokens toks); *)
   let ast = parse_file tokens in
   Stdio.print_s (sexp_of_j_file ast)
 
