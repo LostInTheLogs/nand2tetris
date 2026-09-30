@@ -46,7 +46,7 @@ let format_error (msg, (a, b, ctx)) =
     in
     Printf.sprintf "%4d | %s\n" (line_nr + 1) line ^ "       " ^ carets ^ "\n"
   in
-  Printf.sprintf "%s:%d:%d: error %s\n" filename (ln_a + 1) (char_a + 1) msg
+  Printf.sprintf "%s:%d:%d: error: %s\n" filename (ln_a + 1) (char_a + 1) msg
   ^ String.concat (List.mapi lines ~f:fmt_line)
 
 let err msg (span : span) =
@@ -63,7 +63,13 @@ type tok =
 
 type tokens = tok list [@@deriving sexp]
 type stok = tok spanned
-type tokenize_mode = MNone | MString of int | MIdent of int
+
+type tokenize_mode =
+  | MNone
+  | MString of int
+  | MIdent of int
+  | MLineComment of int
+  | MComment of int * int (* beg, level *)
 
 let tokenize str file =
   let ctx = { source = str; filename = file } in
@@ -72,22 +78,35 @@ let tokenize str file =
   let rec go (i, mode, acc) =
     let flush () =
       match mode with
-      | MNone -> acc
-      | MString beg -> err "unclosed str" (beg - 1, i - 1, ctx)
+      | MNone | MLineComment _ -> acc
+      | MString beg -> err "unclosed str" (beg, i - 1, ctx)
+      | MComment (beg, _) -> err "unclosed comment" (beg, i - 1, ctx)
       | MIdent beg ->
           { t = TIdentifier (substr beg i); s = (beg, i, ctx) } :: acc
     in
     if i >= len then flush ()
     else
       let char = str.[i] in
+      let prev = if i > 0 then str.[i - 1] else ' ' in
+      let next = if i + 1 < len then str.[i + 1] else ' ' in
       go
       @@
       match (mode, char) with
       | MString beg, '"' ->
           ( i + 1,
             MNone,
-            { t = TString (substr beg i); s = (beg, i, ctx) } :: acc )
+            { t = TString (substr (beg + 1) i); s = (beg, i + 1, ctx) } :: acc
+          )
       | MString _, _ -> (i + 1, mode, acc)
+      | MLineComment beg, '\n' -> (i + 1, MNone, acc)
+      | MLineComment _, _ -> (i + 1, mode, acc)
+      | MComment (beg, lvl), '/' when next = '*' ->
+          (i + 2, MComment (beg, lvl + 1), acc)
+      | MComment (beg, lvl), '/' when prev = '*' ->
+          (i + 1, (if lvl = 0 then MNone else MComment (beg, lvl - 1)), acc)
+      | MComment _, _ -> (i + 1, mode, acc)
+      | _, '/' when next = '*' -> (i + 2, MComment (i, 0), acc)
+      | _, '/' when next = '/' -> (i + 2, MLineComment i, acc)
       | _, (';' | '-' | '+' | '*' | '/' | '=' | '~') ->
           ( i + 1,
             MNone,
