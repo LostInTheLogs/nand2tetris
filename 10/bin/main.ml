@@ -5,7 +5,10 @@ open Poly
 
 type span_context = { source : string; filename : string }
 type span = int * int * span_context
-type 'a spanned = { t : 'a; s : span }
+type 'a spanned = { v : 'a; s : span }
+
+let sexp_of_spanned sexp_of_t { v } = sexp_of_t v
+(**)
 
 let substr str a b = String.sub str ~pos:a ~len:(b - a)
 
@@ -54,15 +57,16 @@ let err msg (span : span) =
   Stdlib.exit 1
 
 type tok =
-  | TSemicolon
   | TLParen of char
   | TRParen of char
   | TIdentifier of string
+  | TKeyword of string
+  | TNumber of int
   | TString of string
-[@@deriving sexp]
+[@@deriving sexp_of]
 
-type tokens = tok list [@@deriving sexp]
-type stok = tok spanned
+type tokens = tok list [@@deriving sexp_of]
+type stok = tok spanned [@@deriving sexp_of]
 
 type tokenize_mode =
   | MNone
@@ -70,6 +74,16 @@ type tokenize_mode =
   | MIdent of int
   | MLineComment of int
   | MComment of int * int (* beg, level *)
+
+let tokenize_ident str beg i ctx =
+  match str with
+  | _ when String.for_all str ~f:(fun c -> '0' <= c && c <= '9') -> (
+      match Int.of_string_opt str with
+      | Some n -> TNumber n
+      | None -> err "invalid number" (beg, i, ctx))
+  | "class" | "field" | "constructor" | "method" | "return" | "do" ->
+      TKeyword str
+  | _ -> TIdentifier str
 
 let tokenize str file =
   let ctx = { source = str; filename = file } in
@@ -82,7 +96,8 @@ let tokenize str file =
       | MString beg -> err "unclosed str" (beg, i - 1, ctx)
       | MComment (beg, _) -> err "unclosed comment" (beg, i - 1, ctx)
       | MIdent beg ->
-          { t = TIdentifier (substr beg i); s = (beg, i, ctx) } :: acc
+          { v = tokenize_ident (substr beg i) beg i ctx; s = (beg, i, ctx) }
+          :: acc
     in
     if i >= len then flush ()
     else
@@ -95,7 +110,7 @@ let tokenize str file =
       | MString beg, '"' ->
           ( i + 1,
             MNone,
-            { t = TString (substr (beg + 1) i); s = (beg, i + 1, ctx) } :: acc
+            { v = TString (substr (beg + 1) i); s = (beg, i + 1, ctx) } :: acc
           )
       | MString _, _ -> (i + 1, mode, acc)
       | MLineComment beg, '\n' -> (i + 1, MNone, acc)
@@ -107,15 +122,15 @@ let tokenize str file =
       | MComment _, _ -> (i + 1, mode, acc)
       | _, '/' when next = '*' -> (i + 2, MComment (i, 0), acc)
       | _, '/' when next = '/' -> (i + 2, MLineComment i, acc)
-      | _, (';' | '-' | '+' | '*' | '/' | '=' | '~') ->
+      | _, (';' | ',' | '-' | '+' | '*' | '/' | '=' | '~') ->
           ( i + 1,
             MNone,
-            { t = TIdentifier (Char.to_string char); s = (i, i + 1, ctx) }
+            { v = TIdentifier (Char.to_string char); s = (i, i + 1, ctx) }
             :: flush () )
       | _, ('(' | '[' | '{') ->
-          (i + 1, MNone, { t = TLParen char; s = (i, i + 1, ctx) } :: flush ())
+          (i + 1, MNone, { v = TLParen char; s = (i, i + 1, ctx) } :: flush ())
       | _, (')' | ']' | '}') ->
-          (i + 1, MNone, { t = TRParen char; s = (i, i + 1, ctx) } :: flush ())
+          (i + 1, MNone, { v = TRParen char; s = (i, i + 1, ctx) } :: flush ())
       | _, '"' -> (i + 1, MString (i + 1), flush ())
       | _, (' ' | '\n' | '\t' | '\r') -> (i + 1, MNone, flush ())
       | MIdent _, _ -> (i + 1, mode, acc)
@@ -123,12 +138,94 @@ let tokenize str file =
   in
   List.rev @@ go (0, MNone, [])
 
+type j_expr = string [@@deriving sexp_of]
+
+type j_field = { name : string spanned; ftype : string spanned }
+[@@deriving sexp_of]
+
+type j_method = unit [@@deriving sexp_of]
+
+type j_class = {
+  name : string spanned;
+  fields : j_field list;
+  methods : j_method list;
+}
+[@@deriving sexp_of]
+
+type j_file = { classes : j_class list } [@@deriving sexp_of]
+
+let eof_span (a, b, ctx) = (b, b, ctx)
+
+let err_expected eof tokens expected_msg =
+  match tokens with
+  | { s } :: _ -> err ("Expected " ^ expected_msg) s
+  | [] -> err ("Expected " ^ expected_msg) eof
+
+let expect_ident eof tokens expected_msg =
+  match tokens with
+  | { v = TIdentifier name; s } :: rest -> ({ v = name; s }, eof_span s, rest)
+  | _ -> err_expected eof tokens expected_msg
+
+let expect_lparen eof tokens paren =
+  match tokens with
+  | { v = TLParen p; s } :: rest when p = paren ->
+      ({ v = p; s }, eof_span s, rest)
+  | _ -> err_expected eof tokens ("'" ^ Char.to_string paren ^ "'")
+
+let todo_ : span = (1, 1, { source = ""; filename = "" })
+
+let parse_field eof tokens =
+  match tokens with
+  | { v = TKeyword "field" } :: rest ->
+      let ftype, eof, rest = expect_ident eof rest "field type" in
+      let rec go eof tokens acc =
+        let name, eof, rest = expect_ident eof tokens "field name" in
+        let acc = { name; ftype } :: acc in
+
+        match rest with
+        | { v = TIdentifier ";" } :: rest -> (acc, eof, rest)
+        | { v = TIdentifier "," } :: rest -> go eof rest acc
+        | _ -> err_expected eof rest "';'"
+      in
+      go eof rest []
+  | _ -> failwith "unreachable"
+
+let parse_class eof tokens =
+  let name, eof, rest = expect_ident eof tokens "class name" in
+  let _, eof, rest = expect_lparen eof rest '{' in
+  let rec go eof tokens cls =
+    match tokens with
+    | { v = TKeyword "field" } :: rest ->
+        let field, eof, rest = parse_field eof tokens in
+        go eof rest { cls with fields = field @ cls.fields }
+    | { v = TRParen '}' } :: rest -> (cls, eof, rest)
+    | _ -> err_expected eof tokens "'}'"
+  in
+  let cls, eof, rest = go eof rest { name; fields = []; methods = [] } in
+  ( { cls with fields = List.rev cls.fields; methods = List.rev cls.methods },
+    eof,
+    rest )
+
+let parse_file tokens =
+  let rec go (tokens, acc) =
+    match tokens with
+    | { v = TKeyword "class"; s } :: rest ->
+        let c, _, rest = parse_class (eof_span s) rest in
+        go (rest, c :: acc)
+    | { s } :: rest -> err "unexpected token" s
+    | [] -> List.rev acc
+  in
+  let classes = go (tokens, []) in
+  { classes }
+
 let compile_file file =
   (* In_channel.with_open_text name @@ fun input -> parse input symbol_tbl *)
   let str = In_channel.input_all stdin in
   let tokens = tokenize str file in
-  let toks = List.map tokens ~f:(fun { t } -> t) in
-  Stdio.print_s (sexp_of_tokens toks)
+  let toks = List.map tokens ~f:(fun { v } -> v) in
+  Stdio.print_s (sexp_of_tokens toks);
+  let ast = parse_file tokens in
+  Stdio.print_s (sexp_of_j_file ast)
 
 let () =
   let argv = Sys.get_argv () in
