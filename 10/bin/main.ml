@@ -12,7 +12,7 @@ let sexp_of_spanned sexp_of_t { v } = sexp_of_t v
 
 let substr str a b = String.sub str ~pos:a ~len:(b - a)
 
-let format_error (msg, (a, b, ctx)) =
+let format_error kind (msg, (a, b, ctx)) =
   let { source; filename } = ctx in
   let rawlines = String.split ~on:'\n' source in
   let newline_locations =
@@ -49,16 +49,22 @@ let format_error (msg, (a, b, ctx)) =
     in
     Printf.sprintf "%4d | %s\n" (line_nr + 1) line ^ "       " ^ carets ^ "\n"
   in
-  Printf.sprintf "%s:%d:%d: error: %s\n" filename (ln_a + 1) (char_a + 1) msg
+  Printf.sprintf "%s:%d:%d: %s: %s\n" filename (ln_a + 1) (char_a + 1) kind msg
   ^ String.concat (List.mapi lines ~f:fmt_line)
 
 let err msg (span : span) =
-  Stdio.prerr_endline (format_error (msg, span));
+  Stdio.prerr_endline (format_error "error" (msg, span));
+  Stdlib.exit 1
+
+let err_note msg m_span note n_span =
+  Stdio.prerr_endline (format_error "error" (msg, m_span));
+  Stdio.prerr_endline (format_error "note" (note, n_span));
   Stdlib.exit 1
 
 type tok =
   | TLParen of char
   | TRParen of char
+  | TSpecial of string
   | TIdentifier of string
   | TKeyword of string
   | TNumber of int
@@ -67,6 +73,7 @@ type tok =
 
 type tokens = tok list [@@deriving sexp_of]
 type stok = tok spanned [@@deriving sexp_of]
+type stoks = tok spanned list [@@deriving sexp_of]
 
 type tokenize_mode =
   | MNone
@@ -125,7 +132,7 @@ let tokenize str file =
       | _, (';' | ',' | '-' | '+' | '*' | '/' | '=' | '~') ->
           ( i + 1,
             MNone,
-            { v = TIdentifier (Char.to_string char); s = (i, i + 1, ctx) }
+            { v = TSpecial (Char.to_string char); s = (i, i + 1, ctx) }
             :: flush () )
       | _, ('(' | '[' | '{') ->
           (i + 1, MNone, { v = TLParen char; s = (i, i + 1, ctx) } :: flush ())
@@ -138,7 +145,11 @@ let tokenize str file =
   in
   List.rev @@ go (0, MNone, [])
 
-type j_expr = string spanned [@@deriving sexp_of]
+type j_expr =
+  | TmpExpr of string spanned
+  | ParenExpr of j_expr spanned
+  | IdentifierExpr of string spanned
+[@@deriving sexp_of]
 
 type j_statement =
   | Let of { name : string spanned; value : j_expr }
@@ -176,14 +187,24 @@ let err_expected eof tokens expected_msg =
   | { s } :: _ -> err ("Expected " ^ expected_msg) s
   | [] -> err ("Expected " ^ expected_msg) eof
 
+let err_expected_note eof tokens expected_msg note n_span =
+  match tokens with
+  | { s } :: _ -> err_note ("Expected " ^ expected_msg) s note n_span
+  | [] -> err_note ("Expected " ^ expected_msg) eof note n_span
+
 let expect_ident eof tokens expected_msg =
   match tokens with
   | { v = TIdentifier name; s } :: rest -> ({ v = name; s }, eof_span s, rest)
   | _ -> err_expected eof tokens expected_msg
 
-let expect_x_ident eof tokens expected =
+let expect_special eof tokens expected_msg =
+  match tokens with
+  | { v = TSpecial name; s } :: rest -> ({ v = name; s }, eof_span s, rest)
+  | _ -> err_expected eof tokens expected_msg
+
+let expect_x_special eof tokens expected =
   let msg = "'" ^ expected ^ "'" in
-  let sth, eof, rest = expect_ident eof tokens msg in
+  let sth, eof, rest = expect_special eof tokens msg in
   if sth.v = expected then (sth, eof, rest) else err ("Expected " ^ msg) sth.s
 
 let expect_lparen eof tokens paren =
@@ -192,49 +213,83 @@ let expect_lparen eof tokens paren =
       ({ v = p; s }, eof_span s, rest)
   | _ -> err_expected eof tokens ("'" ^ Char.to_string paren ^ "'")
 
-let todo_ : span = (1, 1, { source = ""; filename = "" })
+let expect_rparen eof tokens paren s =
+  match tokens with
+  | { v = TRParen p; s } :: rest when p = paren ->
+      ({ v = p; s }, eof_span s, rest)
+  | _ ->
+      err_expected_note eof tokens
+        ("'" ^ Char.to_string paren ^ "'")
+        "To match" s
+
+(* TODO: remove *)
+let todo_span : span = (0, 0, { source = "todo_span"; filename = "todo_span" })
 
 (*
-class cwrr { field int iaa; method int iwrr (string sbb, int icc) { let dst = src; return; }  }
-
-class cwrr { field int iaa; method int iwrr (string sbb, int icc) { let dst = src; 
-return; }  }
 
 class cwrr {
   field int iaa;
   method int iwrr (string sbb, int icc) { 
     let dst = src;
-    retur
+    let dst = (src);
+    let dst = ((src));
+    do fun();
+    return dst;
+    return;
+  }  
+}
+
+class cwrr {
+  field int iaa;
+  method int iwrr (string sbb, int icc) { 
+    let dst = src;
+    let dst = (src);
+    let dst = ((src));
+    //do fun();
+    return dst;
+    return;
   }  
 }
  *)
 
-let parse_expr eof tokens =
-  let what, eof, rest = expect_ident eof tokens "expression" in
-  (what, eof, rest)
+let rec parse_term eof tokens : j_expr * span * stoks =
+  match tokens with
+  | { v = TLParen '('; s = lpar_s } :: rest ->
+      let eof = eof_span lpar_s in
+      let expr, eof, rest = parse_expr eof rest in
+      let { s = rpar_s }, eof, rest = expect_rparen eof rest ')' lpar_s in
+      let s_beg, _, ctx = lpar_s in
+      let _, s_end, _ = rpar_s in
+      (ParenExpr { v = expr; s = (s_beg, s_end, ctx) }, eof, rest)
+  | { v = TIdentifier ident; s } :: rest ->
+      (IdentifierExpr { v = ident; s }, eof, rest)
+  | _ -> err_expected eof tokens "expression"
+
+and parse_expr eof tokens : j_expr * span * stoks =
+  let _term0, _eof, _rest = parse_term eof tokens in
+  (_term0, _eof, _rest)
 
 let parse_stmt eof tokens =
   match tokens with
   | { v = TKeyword "return"; s } :: rest -> (
-      let () = err "test" s in
       let eof = eof_span s in
       match rest with
-      | { v = TIdentifier ";"; s } :: rest -> (Return None, eof_span s, rest)
+      | { v = TSpecial ";"; s } :: rest -> (Return None, eof_span s, rest)
       | _ ->
           let what, eof, rest = parse_expr eof rest in
-          let _, eof, rest = expect_x_ident eof rest ";" in
+          let _, eof, rest = expect_x_special eof rest ";" in
           (Return (Some what), eof, rest))
   | { v = TKeyword "do"; s } :: rest ->
       let eof = eof_span s in
       let what, eof, rest = parse_expr eof rest in
-      let _, eof, rest = expect_x_ident eof rest ";" in
+      let _, eof, rest = expect_x_special eof rest ";" in
       (Do what, eof, rest)
   | { v = TKeyword "let"; s } :: rest ->
       let eof = eof_span s in
       let name, eof, rest = expect_ident eof rest "name" in
-      let _, eof, rest = expect_x_ident eof rest "=" in
+      let _, eof, rest = expect_x_special eof rest "=" in
       let value, eof, rest = parse_expr eof rest in
-      let _, eof, rest = expect_x_ident eof rest ";" in
+      let _, eof, rest = expect_x_special eof rest ";" in
       (Let { name; value }, eof, rest)
   | _ -> err_expected eof tokens "statement"
 
@@ -262,8 +317,7 @@ let parse_method eof tokens =
 
             match rest with
             | { v = TRParen ')'; s } :: rest -> (acc, eof_span s, rest)
-            | { v = TIdentifier ","; s } :: rest ->
-                go_params (eof_span s) rest acc
+            | { v = TSpecial ","; s } :: rest -> go_params (eof_span s) rest acc
             | _ -> err_expected eof rest "')'")
       in
       let _, eof, rest = expect_lparen eof rest '(' in
@@ -295,8 +349,8 @@ let parse_field eof tokens =
         let acc = { name; ftype } :: acc in
 
         match rest with
-        | { v = TIdentifier ";"; s } :: rest -> (acc, eof, rest)
-        | { v = TIdentifier ","; s } :: rest -> go eof rest acc
+        | { v = TSpecial ";"; s } :: rest -> (acc, eof, rest)
+        | { v = TSpecial ","; s } :: rest -> go eof rest acc
         | _ -> err_expected eof rest "';'"
       in
       go eof rest []
