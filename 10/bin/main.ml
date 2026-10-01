@@ -145,16 +145,19 @@ let tokenize str file =
   in
   List.rev @@ go (0, MNone, [])
 
-type j_expr =
-  | TmpExpr of string spanned
-  | ParenExpr of j_expr spanned
-  | IdentifierExpr of string spanned
+type jexpr =
+  | TmpExpr of string
+  | ParenExpr of sjexpr
+  | IdentifierExpr of string
+  | FnCallExpr of { fn : sjexpr; args : sjexpr list }
 [@@deriving sexp_of]
 
+and sjexpr = jexpr spanned [@@deriving sexp_of]
+
 type j_statement =
-  | Let of { name : string spanned; value : j_expr }
-  | Do of j_expr
-  | Return of j_expr option
+  | Let of { name : string spanned; value : sjexpr }
+  | Do of sjexpr
+  | Return of sjexpr option
 [@@deriving sexp_of]
 
 type j_field = { ftype : string spanned; name : string spanned }
@@ -220,7 +223,7 @@ let expect_rparen eof tokens paren s =
   | _ ->
       err_expected_note eof tokens
         ("'" ^ Char.to_string paren ^ "'")
-        "To match" s
+        "To match:" s
 
 (* TODO: remove *)
 let todo_span : span = (0, 0, { source = "todo_span"; filename = "todo_span" })
@@ -234,6 +237,8 @@ class cwrr {
     let dst = (src);
     let dst = ((src));
     do fun();
+    do fun(a,b);
+    do fun(wrr(a),(b));
     return dst;
     return;
   }  
@@ -252,7 +257,7 @@ class cwrr {
 }
  *)
 
-let rec parse_term eof tokens : j_expr * span * stoks =
+let rec parse_term eof tokens : sjexpr * span * stoks =
   match tokens with
   | { v = TLParen '('; s = lpar_s } :: rest ->
       let eof = eof_span lpar_s in
@@ -260,14 +265,34 @@ let rec parse_term eof tokens : j_expr * span * stoks =
       let { s = rpar_s }, eof, rest = expect_rparen eof rest ')' lpar_s in
       let s_beg, _, ctx = lpar_s in
       let _, s_end, _ = rpar_s in
-      (ParenExpr { v = expr; s = (s_beg, s_end, ctx) }, eof, rest)
+      ({ v = ParenExpr expr; s = (s_beg, s_end, ctx) }, eof, rest)
   | { v = TIdentifier ident; s } :: rest ->
-      (IdentifierExpr { v = ident; s }, eof, rest)
+      ({ v = IdentifierExpr ident; s }, eof, rest)
   | _ -> err_expected eof tokens "expression"
 
-and parse_expr eof tokens : j_expr * span * stoks =
-  let _term0, _eof, _rest = parse_term eof tokens in
-  (_term0, _eof, _rest)
+and parse_expr eof tokens : sjexpr * span * stoks =
+  let term0, eof, rest = parse_term eof tokens in
+  match rest with
+  | { v = TLParen '('; s = lpar_s } :: rest ->
+      let rec go_args eof tokens acc =
+        match tokens with
+        | { v = TRParen ')'; s } :: rest -> (List.rev acc, eof_span s, rest)
+        | [] -> err_expected eof tokens "')'"
+        | _ -> (
+            let arg, eof, rest = parse_expr eof tokens in
+            let acc = arg :: acc in
+
+            match rest with
+            | { v = TRParen ')'; s } :: rest -> (List.rev acc, eof_span s, rest)
+            | { v = TSpecial ","; s } :: rest -> go_args (eof_span s) rest acc
+            | _ -> err_expected eof rest "')'")
+      in
+      let args, eof, rest = go_args eof rest [] in
+      let { s = s_beg, _, ctx } = term0 in
+      let _, s_end, _ = eof in
+      let s = (s_beg, s_end, ctx) in
+      ({ v = FnCallExpr { fn = term0; args }; s }, eof, rest)
+  | _ -> (term0, eof, rest)
 
 let parse_stmt eof tokens =
   match tokens with
@@ -308,25 +333,24 @@ let parse_method eof tokens =
       (* params *)
       let rec go_params eof tokens acc =
         match tokens with
-        | { v = TRParen ')'; s } :: rest -> (acc, eof_span s, rest)
+        | { v = TRParen ')'; s } :: rest -> (List.rev acc, eof_span s, rest)
         | [] -> err_expected eof tokens "')'"
         | _ -> (
-            let atype, eof, rest = expect_ident eof tokens "argument type" in
-            let aname, eof, rest = expect_ident eof rest "argument name" in
-            let acc = { name = aname; ftype = atype } :: acc in
+            let ptype, eof, rest = expect_ident eof tokens "param type" in
+            let pname, eof, rest = expect_ident eof rest "param name" in
+            let acc = { name = pname; ftype = ptype } :: acc in
 
             match rest with
-            | { v = TRParen ')'; s } :: rest -> (acc, eof_span s, rest)
+            | { v = TRParen ')'; s } :: rest -> (List.rev acc, eof_span s, rest)
             | { v = TSpecial ","; s } :: rest -> go_params (eof_span s) rest acc
             | _ -> err_expected eof rest "')'")
       in
       let _, eof, rest = expect_lparen eof rest '(' in
       let params, eof, rest = go_params eof rest [] in
-      let params = List.rev params in
       (* body *)
       let rec go_body eof tokens acc =
         match tokens with
-        | { v = TRParen '}'; s } :: rest -> (acc, eof_span s, rest)
+        | { v = TRParen '}'; s } :: rest -> (List.rev acc, eof_span s, rest)
         | [] -> err_expected eof tokens "'}'"
         | _ ->
             let stmt, eof, rest = parse_stmt eof tokens in
@@ -334,7 +358,6 @@ let parse_method eof tokens =
       in
       let _, eof, rest = expect_lparen eof rest '{' in
       let stmts, eof, rest = go_body eof rest [] in
-      let stmts = List.rev stmts in
 
       ({ category; mtype; name; params; statements = stmts }, eof, rest)
   | _ -> failwith "unreachable"
