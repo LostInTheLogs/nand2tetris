@@ -213,8 +213,6 @@ let parse_expr eof tokens =
   let what, eof, rest = expect_ident eof tokens "expression" in
   (what, eof, rest)
 
-[@@@warning "-8"]
-
 let parse_stmt eof tokens =
   match tokens with
   | { v = TKeyword "return"; s } :: rest -> (
@@ -339,8 +337,8 @@ let compile_file file =
   (* In_channel.with_open_text name @@ fun input -> parse input symbol_tbl *)
   let str = In_channel.input_all stdin in
   let tokens = tokenize str file in
-  let toks = List.map tokens ~f:(fun { v } -> v) in
-  Stdio.print_s (sexp_of_tokens toks);
+  (* let toks = List.map tokens ~f:(fun { v } -> v) in
+  Stdio.print_s (sexp_of_tokens toks); *)
   let ast = parse_file tokens in
   Stdio.print_s (sexp_of_j_file ast)
 
