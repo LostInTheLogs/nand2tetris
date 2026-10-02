@@ -146,10 +146,13 @@ let tokenize str file =
   List.rev @@ go (0, MNone, [])
 
 type jexpr =
-  | TmpExpr of string
   | ParenExpr of sjexpr
   | IdentifierExpr of string
+  | StringExpr of string
+  | NumberExpr of int
   | FnCallExpr of { fn : sjexpr; args : sjexpr list }
+  | BinOpExpr of { op : string; left : sjexpr; right : sjexpr }
+  | UnaryOpExpr of { op : string; arg : sjexpr }
 [@@deriving sexp_of]
 
 and sjexpr = jexpr spanned [@@deriving sexp_of]
@@ -247,31 +250,55 @@ class cwrr {
 class cwrr {
   field int iaa;
   method int iwrr (string sbb, int icc) { 
-    let dst = src;
-    let dst = (src);
-    let dst = ((src));
-    //do fun();
-    return dst;
-    return;
+    return ~(a + b)();
+    return ~1+2*3;
+    return 1*~2+3;
   }  
+   method void erase() {
+      // Draws the square using the color white (background color)
+      do Screen.setColor(false);
+      do Screen.drawRectangle(x, y, x + , y + size);
+      return;
+   }
 }
+
+x = 1 + 2 * 3
+x = (1+2) * 3
+
+x = a || ~b || c
+
+x = 1+1=3 || true
  *)
 
-let rec parse_term eof tokens : sjexpr * span * stoks =
+let span_from_to left right =
+  let s_beg, _, ctx = left in
+  let _, s_end, _ = right in
+  (s_beg, s_end, ctx)
+
+let rec parse_atom eof tokens : sjexpr * span * stoks =
   match tokens with
+  | { v = TSpecial "~"; s = beg_s } :: rest ->
+      let eof = eof_span beg_s in
+      let arg, eof, rest = parse_postfix eof rest in
+      ( { v = UnaryOpExpr { op = "~"; arg }; s = span_from_to beg_s eof },
+        eof,
+        rest )
   | { v = TLParen '('; s = lpar_s } :: rest ->
       let eof = eof_span lpar_s in
       let expr, eof, rest = parse_expr eof rest in
-      let { s = rpar_s }, eof, rest = expect_rparen eof rest ')' lpar_s in
-      let s_beg, _, ctx = lpar_s in
-      let _, s_end, _ = rpar_s in
-      ({ v = ParenExpr expr; s = (s_beg, s_end, ctx) }, eof, rest)
+      let rpar, eof, rest = expect_rparen eof rest ')' lpar_s in
+      ({ v = ParenExpr expr; s = span_from_to lpar_s rpar.s }, eof, rest)
   | { v = TIdentifier ident; s } :: rest ->
-      ({ v = IdentifierExpr ident; s }, eof, rest)
-  | _ -> err_expected eof tokens "expression"
+      ({ v = IdentifierExpr ident; s }, eof_span s, rest)
+  | { v = TString ident; s } :: rest ->
+      ({ v = StringExpr ident; s = eof_span s }, eof, rest)
+  | { v = TNumber ident; s } :: rest ->
+      ({ v = NumberExpr ident; s = eof_span s }, eof, rest)
+  | _ -> err_expected eof tokens "atom"
 
-and parse_expr eof tokens : sjexpr * span * stoks =
-  let term0, eof, rest = parse_term eof tokens in
+and parse_postfix eof tokens =
+  let next = parse_atom in
+  let term0, eof, rest = next eof tokens in
   match rest with
   | { v = TLParen '('; s = lpar_s } :: rest ->
       let rec go_args eof tokens acc =
@@ -288,11 +315,38 @@ and parse_expr eof tokens : sjexpr * span * stoks =
             | _ -> err_expected eof rest "')'")
       in
       let args, eof, rest = go_args eof rest [] in
-      let { s = s_beg, _, ctx } = term0 in
-      let _, s_end, _ = eof in
-      let s = (s_beg, s_end, ctx) in
+      let s = span_from_to term0.s eof in
       ({ v = FnCallExpr { fn = term0; args }; s }, eof, rest)
   | _ -> (term0, eof, rest)
+
+and parse_mult eof tokens =
+  let next = parse_postfix in
+  let this = parse_mult in
+  let left, eof, rest = next eof tokens in
+  match rest with
+  | { v = TSpecial (("*" | "/") as op) } :: rest ->
+      let right, eof, rest = this eof rest in
+      ( { v = BinOpExpr { op; left; right }; s = span_from_to left.s right.s },
+        eof,
+        rest )
+  | _ -> (left, eof, rest)
+
+and parse_sum eof tokens =
+  let next = parse_mult in
+  let this = parse_sum in
+  let left, eof, rest = next eof tokens in
+  match rest with
+  | { v = TSpecial (("+" | "-") as op) } :: rest ->
+      let right, eof, rest = this eof rest in
+      ( { v = BinOpExpr { op; left; right }; s = span_from_to left.s right.s },
+        eof,
+        rest )
+  | _ -> (left, eof, rest)
+
+and parse_expr eof tokens : sjexpr * span * stoks =
+  let next = parse_sum in
+  let term0, eof, rest = next eof tokens in
+  match rest with _ -> (term0, eof, rest)
 
 let parse_stmt eof tokens =
   match tokens with
