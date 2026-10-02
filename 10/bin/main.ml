@@ -88,7 +88,8 @@ let tokenize_ident str beg i ctx =
       match Int.of_string_opt str with
       | Some n -> TNumber n
       | None -> err "invalid number" (beg, i, ctx))
-  | "class" | "field" | "constructor" | "method" | "let" | "return" | "do" ->
+  | "class" | "field" | "static" | "constructor" | "method" | "function" | "let"
+  | "var" | "return" | "do" | "if" | "else" | "while" ->
       TKeyword str
   | _ -> TIdentifier str
 
@@ -129,7 +130,13 @@ let tokenize str file =
       | MComment _, _ -> (i + 1, mode, acc)
       | _, '/' when next = '*' -> (i + 2, MComment (i, 0), acc)
       | _, '/' when next = '/' -> (i + 2, MLineComment i, acc)
-      | _, (';' | ',' | '-' | '+' | '*' | '/' | '=' | '~') ->
+      | _, '<' when next = '=' ->
+          (i + 2, MNone, { v = TSpecial "<="; s = (i, i + 2, ctx) } :: flush ())
+      | _, '>' when next = '=' ->
+          (i + 2, MNone, { v = TSpecial ">="; s = (i, i + 2, ctx) } :: flush ())
+      | ( _,
+          (';' | ',' | '-' | '+' | '*' | '/' | '=' | '~' | '|' | '&' | '>' | '<')
+        ) ->
           ( i + 1,
             MNone,
             { v = TSpecial (Char.to_string char); s = (i, i + 1, ctx) }
@@ -157,29 +164,40 @@ type jexpr =
 
 and sjexpr = jexpr spanned [@@deriving sexp_of]
 
+type j_fields = { ftype : string spanned; names : string spanned list }
+[@@deriving sexp_of]
+
+type j_arg = { atype : string spanned; name : string spanned }
+[@@deriving sexp_of]
+
 type j_statement =
   | Let of { name : string spanned; value : sjexpr }
+  | If of {
+      cond : sjexpr;
+      body : j_statement list;
+      ielse : j_statement list option;
+    }
+  | While of { cond : sjexpr; body : j_statement list }
   | Do of sjexpr
+  | Var of j_fields
   | Return of sjexpr option
 [@@deriving sexp_of]
 
-type j_field = { ftype : string spanned; name : string spanned }
-[@@deriving sexp_of]
-
-type metod_category = Method | Constructor [@@deriving sexp_of]
+type metod_category = Method | Constructor | Function [@@deriving sexp_of]
 
 type j_method = {
   category : metod_category;
   mtype : string spanned;
   name : string spanned;
-  params : j_field list;
-  statements : j_statement list;
+  params : j_arg list;
+  body : j_statement list;
 }
 [@@deriving sexp_of]
 
 type j_class = {
   name : string spanned;
-  fields : j_field list;
+  fields : j_fields list;
+  statics : j_fields list;
   methods : j_method list;
 }
 [@@deriving sexp_of]
@@ -235,39 +253,22 @@ let todo_span : span = (0, 0, { source = "todo_span"; filename = "todo_span" })
 
 class cwrr {
   field int iaa;
-  method int iwrr (string sbb, int icc) { 
-    let dst = src;
-    let dst = (src);
-    let dst = ((src));
-    do fun();
-    do fun(a,b);
-    do fun(wrr(a),(b));
-    return dst;
+  constructor void incSize() {
+    if (((y + size) < 254) & ((x + size) < 510)) {
+      do erase();
+      let size = size + 2;
+      do draw();
+    }
     return;
-  }  
+  }
 }
 
 class cwrr {
   field int iaa;
   method int iwrr (string sbb, int icc) { 
-    return ~(a + b)();
-    return ~1+2*3;
-    return 1*~2+3;
+    return 1 | 2 & 3 | 4 > 1 | 2;
   }  
-   method void erase() {
-      // Draws the square using the color white (background color)
-      do Screen.setColor(false);
-      do Screen.drawRectangle(x, y, x + , y + size);
-      return;
-   }
 }
-
-x = 1 + 2 * 3
-x = (1+2) * 3
-
-x = a || ~b || c
-
-x = 1+1=3 || true
  *)
 
 let span_from_to left right =
@@ -277,12 +278,10 @@ let span_from_to left right =
 
 let rec parse_atom eof tokens : sjexpr * span * stoks =
   match tokens with
-  | { v = TSpecial "~"; s = beg_s } :: rest ->
+  | { v = TSpecial (("~" | "-") as op); s = beg_s } :: rest ->
       let eof = eof_span beg_s in
       let arg, eof, rest = parse_postfix eof rest in
-      ( { v = UnaryOpExpr { op = "~"; arg }; s = span_from_to beg_s eof },
-        eof,
-        rest )
+      ({ v = UnaryOpExpr { op; arg }; s = span_from_to beg_s eof }, eof, rest)
   | { v = TLParen '('; s = lpar_s } :: rest ->
       let eof = eof_span lpar_s in
       let expr, eof, rest = parse_expr eof rest in
@@ -324,7 +323,7 @@ and parse_mult eof tokens =
   let this = parse_mult in
   let left, eof, rest = next eof tokens in
   match rest with
-  | { v = TSpecial (("*" | "/") as op) } :: rest ->
+  | { v = TSpecial (("*" | "/" | "&") as op) } :: rest ->
       let right, eof, rest = this eof rest in
       ( { v = BinOpExpr { op; left; right }; s = span_from_to left.s right.s },
         eof,
@@ -336,7 +335,19 @@ and parse_sum eof tokens =
   let this = parse_sum in
   let left, eof, rest = next eof tokens in
   match rest with
-  | { v = TSpecial (("+" | "-") as op) } :: rest ->
+  | { v = TSpecial (("+" | "-" | "|") as op) } :: rest ->
+      let right, eof, rest = this eof rest in
+      ( { v = BinOpExpr { op; left; right }; s = span_from_to left.s right.s },
+        eof,
+        rest )
+  | _ -> (left, eof, rest)
+
+and parse_cond eof tokens =
+  let next = parse_sum in
+  let this = parse_cond in
+  let left, eof, rest = next eof tokens in
+  match rest with
+  | { v = TSpecial (("<" | "<=" | "=" | ">=" | ">") as op) } :: rest ->
       let right, eof, rest = this eof rest in
       ( { v = BinOpExpr { op; left; right }; s = span_from_to left.s right.s },
         eof,
@@ -344,11 +355,23 @@ and parse_sum eof tokens =
   | _ -> (left, eof, rest)
 
 and parse_expr eof tokens : sjexpr * span * stoks =
-  let next = parse_sum in
+  let next = parse_cond in
   let term0, eof, rest = next eof tokens in
   match rest with _ -> (term0, eof, rest)
 
-let parse_stmt eof tokens =
+and parse_block eof tokens =
+  let rec go eof tokens acc =
+    match tokens with
+    | { v = TRParen '}'; s } :: rest -> (List.rev acc, eof_span s, rest)
+    | [] -> err_expected eof tokens "'}'"
+    | _ ->
+        let stmt, eof, rest = parse_stmt eof tokens in
+        go eof rest (stmt :: acc)
+  in
+  let _, eof, rest = expect_lparen eof tokens '{' in
+  go eof rest []
+
+and parse_stmt eof tokens =
   match tokens with
   | { v = TKeyword "return"; s } :: rest -> (
       let eof = eof_span s in
@@ -358,6 +381,9 @@ let parse_stmt eof tokens =
           let what, eof, rest = parse_expr eof rest in
           let _, eof, rest = expect_x_special eof rest ";" in
           (Return (Some what), eof, rest))
+  | { v = TKeyword "var" } :: rest ->
+      let fields, eof, rest = parse_field eof tokens "var" in
+      (Var fields, eof, rest)
   | { v = TKeyword "do"; s } :: rest ->
       let eof = eof_span s in
       let what, eof, rest = parse_expr eof rest in
@@ -370,16 +396,60 @@ let parse_stmt eof tokens =
       let value, eof, rest = parse_expr eof rest in
       let _, eof, rest = expect_x_special eof rest ";" in
       (Let { name; value }, eof, rest)
+  | { v = TKeyword "if"; s } :: rest ->
+      let eof = eof_span s in
+      let lpar, eof, rest = expect_lparen eof rest '(' in
+      let cond, eof, rest = parse_expr eof rest in
+      let _, eof, rest = expect_rparen eof rest ')' lpar.s in
+      let body, eof, rest = parse_block eof rest in
+      let go eof tokens =
+        match tokens with
+        | { v = TKeyword "else"; s } :: rest ->
+            let eof = eof_span s in
+            let body, eof, rest = parse_block eof rest in
+            (Some body, eof, rest)
+        | _ -> (None, eof, tokens)
+      in
+      let ielse, eof, rest = go eof rest in
+      (* TODO: if else *)
+      (If { cond; body; ielse }, eof, rest)
+  | { v = TKeyword "while"; s } :: rest ->
+      let eof = eof_span s in
+      let lpar, eof, rest = expect_lparen eof rest '(' in
+      let cond, eof, rest = parse_expr eof rest in
+      let _, eof, rest = expect_rparen eof rest ')' lpar.s in
+      let body, eof, rest = parse_block eof rest in
+      (While { cond; body }, eof, rest)
   | _ -> err_expected eof tokens "statement"
+
+and parse_field eof tokens keyword : j_fields * span * stoks =
+  match tokens with
+  | { v = TKeyword kw; s } :: rest when kw = keyword ->
+      let eof = eof_span s in
+      let ftype, eof, rest = expect_ident eof rest (kw ^ " type") in
+      let rec go eof tokens acc =
+        let name, eof, rest = expect_ident eof tokens (kw ^ " name") in
+        let acc = name :: acc in
+
+        match rest with
+        | { v = TSpecial ";"; s } :: rest -> (acc, eof, rest)
+        | { v = TSpecial ","; s } :: rest -> go eof rest acc
+        | _ -> err_expected eof rest "';'"
+      in
+      let names, eof, rest = go eof rest [] in
+      ({ names; ftype }, eof, rest)
+  | _ -> failwith "unreachable"
 
 let parse_method eof tokens =
   match tokens with
-  | { v = TKeyword (("constructor" | "method") as cat); s } :: rest ->
+  | { v = TKeyword (("constructor" | "method" | "function") as cat); s } :: rest
+    ->
       let eof = eof_span s in
       let category =
         match cat with
         | "constructor" -> Constructor
         | "method" -> Method
+        | "function" -> Function
         | _ -> failwith "unreachable"
       in
       let mtype, eof, rest = expect_ident eof rest "method type" in
@@ -392,7 +462,7 @@ let parse_method eof tokens =
         | _ -> (
             let ptype, eof, rest = expect_ident eof tokens "param type" in
             let pname, eof, rest = expect_ident eof rest "param name" in
-            let acc = { name = pname; ftype = ptype } :: acc in
+            let acc = { name = pname; atype = ptype } :: acc in
 
             match rest with
             | { v = TRParen ')'; s } :: rest -> (List.rev acc, eof_span s, rest)
@@ -402,35 +472,9 @@ let parse_method eof tokens =
       let _, eof, rest = expect_lparen eof rest '(' in
       let params, eof, rest = go_params eof rest [] in
       (* body *)
-      let rec go_body eof tokens acc =
-        match tokens with
-        | { v = TRParen '}'; s } :: rest -> (List.rev acc, eof_span s, rest)
-        | [] -> err_expected eof tokens "'}'"
-        | _ ->
-            let stmt, eof, rest = parse_stmt eof tokens in
-            go_body eof rest (stmt :: acc)
-      in
-      let _, eof, rest = expect_lparen eof rest '{' in
-      let stmts, eof, rest = go_body eof rest [] in
+      let stmts, eof, rest = parse_block eof rest in
 
-      ({ category; mtype; name; params; statements = stmts }, eof, rest)
-  | _ -> failwith "unreachable"
-
-let parse_field eof tokens =
-  match tokens with
-  | { v = TKeyword "field"; s } :: rest ->
-      let eof = eof_span s in
-      let ftype, eof, rest = expect_ident eof rest "field type" in
-      let rec go eof tokens acc =
-        let name, eof, rest = expect_ident eof tokens "field name" in
-        let acc = { name; ftype } :: acc in
-
-        match rest with
-        | { v = TSpecial ";"; s } :: rest -> (acc, eof, rest)
-        | { v = TSpecial ","; s } :: rest -> go eof rest acc
-        | _ -> err_expected eof rest "';'"
-      in
-      go eof rest []
+      ({ category; mtype; name; params; body = stmts }, eof, rest)
   | _ -> failwith "unreachable"
 
 let parse_class eof tokens =
@@ -439,15 +483,20 @@ let parse_class eof tokens =
   let rec go eof tokens cls =
     match tokens with
     | { v = TKeyword "field" } :: rest ->
-        let item, eof, rest = parse_field eof tokens in
-        go eof rest { cls with fields = item @ cls.fields }
-    | { v = TKeyword "method" } :: rest ->
+        let item, eof, rest = parse_field eof tokens "field" in
+        go eof rest { cls with fields = item :: cls.fields }
+    | { v = TKeyword "static" } :: rest ->
+        let item, eof, rest = parse_field eof tokens "static" in
+        go eof rest { cls with statics = item :: cls.statics }
+    | { v = TKeyword ("method" | "constructor" | "function") } :: rest ->
         let item, eof, rest = parse_method eof tokens in
         go eof rest { cls with methods = item :: cls.methods }
     | { v = TRParen '}' } :: rest -> (cls, eof, rest)
     | _ -> err_expected eof tokens "'}'"
   in
-  let cls, eof, rest = go eof rest { name; fields = []; methods = [] } in
+  let cls, eof, rest =
+    go eof rest { name; fields = []; statics = []; methods = [] }
+  in
   ( { cls with fields = List.rev cls.fields; methods = List.rev cls.methods },
     eof,
     rest )
