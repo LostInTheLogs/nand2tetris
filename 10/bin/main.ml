@@ -8,8 +8,6 @@ type span = int * int * span_context
 type 'a spanned = { v : 'a; s : span }
 
 let sexp_of_spanned sexp_of_t { v } = sexp_of_t v
-(**)
-
 let substr str a b = String.sub str ~pos:a ~len:(b - a)
 
 let format_error kind (msg, (a, b, ctx)) =
@@ -246,31 +244,6 @@ let expect_rparen eof tokens paren s =
         ("'" ^ Char.to_string paren ^ "'")
         "To match:" s
 
-(* TODO: remove *)
-let todo_span : span = (0, 0, { source = "todo_span"; filename = "todo_span" })
-
-(*
-
-class cwrr {
-  field int iaa;
-  constructor void incSize() {
-    if (((y + size) < 254) & ((x + size) < 510)) {
-      do erase();
-      let size = size + 2;
-      do draw();
-    }
-    return;
-  }
-}
-
-class cwrr {
-  field int iaa;
-  method int iwrr (string sbb, int icc) { 
-    return 1 | 2 & 3 | 4 > 1 | 2;
-  }  
-}
- *)
-
 let span_from_to left right =
   let s_beg, _, ctx = left in
   let _, s_end, _ = right in
@@ -411,7 +384,6 @@ and parse_stmt eof tokens =
         | _ -> (None, eof, tokens)
       in
       let ielse, eof, rest = go eof rest in
-      (* TODO: if else *)
       (If { cond; body; ielse }, eof, rest)
   | { v = TKeyword "while"; s } :: rest ->
       let eof = eof_span s in
